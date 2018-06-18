@@ -32,6 +32,8 @@ In this analysis we want to create spatial estimates of sea cucumber abundance w
 
 We have data on sea cucumber density in a number of locations across a number of years. For each of the sites we also have information about substrate type. At present we are modelling sea cucumber abundance (sc_density*100). 
 
+### Load data
+
 ```{r load_data}
 # substrate data - calculate from this a % suitable and Shannon evenness for each transect
 # (NB 0 = sand = not suitable; all other substrate types are suitable)
@@ -83,27 +85,23 @@ dat <- read_csv("data/sea_cucumber_data.csv", na = c("", "NA", "ND")) %>%
 dat_narrow <- dat %>% gather(covariate, value, -latitude, -longitude, -yday, -z, -y, -sc_abundance)
 ```
 
+We have `r nrow(dat)` observations of sea cucumber densities. NB to avoid complications, we will be modelling as abundances (density * 100) and then converting the predictions back to densities. 
 
-There is a quadratic relationship with day of the year: we control for date as a random factor because we are not interested in estimating this relationship. 
+### Data exploration
 
-```{r date_cor}
-ggplot(dat, aes(x = yday, y = sc_abundance)) + 
-  geom_point(na.rm = TRUE) + 
-  geom_smooth(method = "lm", formula = y ~ x + I(x^2))
-```
-
-Additional structure in the data: we have multiple transects per site which are likely to be caught by the spatial random field. Initial explorations show that including site as a random effect results in a more supported model (lower DIC), but this does not allow us to make spatial predictions. 
-
-What do the sea cucumber abundances look like. 
+What do the sea cucumber densities look like. 
 
 ```{r explore_distributions}
-ggplot(data = dat, aes(x = sc_abundance)) + 
+ggplot(data = dat, aes(x = sc_density)) + 
   geom_histogram(binwidth = 1)
 
 dat %>% group_by(z) %>% summarise(count = n()) %>% rename(occurrence = z) %>% kable()
 ```
 
-Non-zero abundance ranges from `r min(dat$y, na.rm = TRUE)` to `r max(dat$y, na.rm = TRUE)`; we will model as a negative binomial hurdle model. Occurrence will be fitted with a binomial model. 
+Non-zero density ranges from `r min(dat$y, na.rm = TRUE)/100` to `r max(dat$y, na.rm = TRUE)/100`; we will model the abundances (*100) as a negative binomial hurdle model. Occurrence will be fitted with a binomial model. 
+
+### Spatial data
+
 We only want to model and predict within the < 30m depth zone, so let's load this data, plot and create some prediction points. 
 
 ```{r spatial_data, fig.width = 10}
@@ -142,6 +140,13 @@ ggplot() +
 
 ## INLA Modelling
 
+We will compare 4 different modelling approaches. All approaches are hurdle models where occurrence is modelled using the binomial distribution and abundance is modelled using the negative binomial distribution: 
+
+1. null: Intercept-only model
+2. habitat: Proportion of suitable habitat (non-sand substrate) as a fixed non-spatial covariate
+3. spatial: Spatial structure included as a random field (SPDE Matern correlation)
+4. joint: Proportion of suitable habitat is estimated using a random spatial field and Gaussian distribution; this is then used in both the occurrence and abundance part of the hurdle model as a fixed spatial factor. This allows us to estimate both habitat suitability and abundance at the same time. 
+
 ### INLA Mesh
 
 We need a spatial mesh to create the spatial random field. This will be restricted to the convex hull around the prediction points. 
@@ -149,7 +154,7 @@ We need a spatial mesh to create the spatial random field. This will be restrict
 ```{r create_mesh}
 # Create mesh
 pred_dat <- pred_dat %>% as.matrix
-ch <- inla.nonconvex.hull(pred_dat[,1:2], convex = -0.05)
+ch <- inla.nonconvex.hull(rbind(pred_dat, select(dat, x = longitude, y = latitude)) %>% as.matrix, convex = -0.05)
 
 # NB this mesh could be smaller - when we've got a good analysis going, need to change it. 
 mesh <- inla.mesh.2d(boundary = ch,
@@ -234,7 +239,7 @@ Finally, we're going to run the model. We will use a hurdle model approach (bino
 
 Starting off as intercept only models
 
-```{r inla_models, eval = FALSE}
+```{r inla_models}
 # 1. Null (intercept only)
 f_null <- alldata ~ -1 + z_intercept + y_intercept
 m_null <- inla(f_null, family = c("nbinomial", "binomial"),
@@ -298,7 +303,7 @@ map_dfr(mods, function(x) {
     group_by(family) %>% 
     summarise(dic = sum(dic)) %>% 
     filter(family %in% c(1, 2)) %>% 
-    mutate(measure = c("Abundance", "occurrence"))
+    mutate(measure = c("Abundance", "Occurrence"))
 }, .id = "model") %>% 
   select(-family) %>% 
   spread(measure, dic) %>% 
@@ -357,7 +362,9 @@ save_plot(density, filename = "figures/occurrence_performance.jpg")
 
 Both spatial and joint outperform the null and habitat only models, with the joint (habitat and spatial) model performing best (again, only marginally). No models are predicting the full range of abundance, and the high predicted values carry a lot of uncertainty. 
 
-### Prediction of the response
+## Prediction of the response
+
+All predictions use the joint model.
 
 ```{r pred_vals, fig.width = 15}
 # get the id's for each field
@@ -394,7 +401,7 @@ pred_vals <- as.tibble(pred_dat) %>%
          habsd = inla.mesh.project(projgrid, field = apply(pred_hab, 1, sd)))
 ```
 
-#### Density predictions
+### Density predictions
 
 ```{r density_plot, fig.width = 15, fig.height = 10}
 ymean_plot <- ggplot() + 
@@ -417,7 +424,7 @@ save_plot(plot_grid(ymean_plot, ysd_plot),
           base_height = 10)
 ```
 
-#### Occurrence predictions
+### Occurrence predictions
 
 ```{r occurrence_plot, fig.width = 15, fig.height = 10}
 zmean_plot <- ggplot() + 
@@ -440,7 +447,7 @@ save_plot(plot_grid(zmean_plot, zsd_plot),
           base_height = 10)
 ```
 
-#### Habitat proportion prediction
+### Habitat proportion prediction
 
 ```{r habitat_plot, fig.width = 15, fig.height = 10}
 habmean_plot <- ggplot() + 

@@ -16,6 +16,8 @@ In this analysis we want to create spatial estimates of sea cucumber abundance w
 
 We have data on sea cucumber density in a number of locations across a number of years. For each of the sites we also have information about substrate type. At present we are modelling sea cucumber abundance (sc_density*100). 
 
+### Load data
+
 
 ```r
 # substrate data - calculate from this a % suitable and Shannon evenness for each transect
@@ -129,25 +131,15 @@ dat <- read_csv("data/sea_cucumber_data.csv", na = c("", "NA", "ND")) %>%
 dat_narrow <- dat %>% gather(covariate, value, -latitude, -longitude, -yday, -z, -y, -sc_abundance)
 ```
 
+We have 724 observations of sea cucumber densities. NB to avoid complications, we will be modelling as abundances (density * 100) and then converting the predictions back to densities. 
 
-There is a quadratic relationship with day of the year: we control for date as a random factor because we are not interested in estimating this relationship. 
+### Data exploration
 
-
-```r
-ggplot(dat, aes(x = yday, y = sc_abundance)) + 
-  geom_point(na.rm = TRUE) + 
-  geom_smooth(method = "lm", formula = y ~ x + I(x^2))
-```
-
-![](sea_cucumber_spatial_hurdle_files/figure-html/date_cor-1.png)<!-- -->
-
-Additional structure in the data: we have multiple transects per site which are likely to be caught by the spatial random field. Initial explorations show that including site as a random effect results in a more supported model (lower DIC), but this does not allow us to make spatial predictions. 
-
-What do the sea cucumber abundances look like. 
+What do the sea cucumber densities look like. 
 
 
 ```r
-ggplot(data = dat, aes(x = sc_abundance)) + 
+ggplot(data = dat, aes(x = sc_density)) + 
   geom_histogram(binwidth = 1)
 ```
 
@@ -164,7 +156,10 @@ dat %>% group_by(z) %>% summarise(count = n()) %>% rename(occurrence = z) %>% ka
           0     285
           1     439
 
-Non-zero abundance ranges from 1 to 22; we will model as a negative binomial hurdle model. Occurrence will be fitted with a binomial model. 
+Non-zero density ranges from 0.01 to 0.22; we will model the abundances (*100) as a negative binomial hurdle model. Occurrence will be fitted with a binomial model. 
+
+### Spatial data
+
 We only want to model and predict within the < 30m depth zone, so let's load this data, plot and create some prediction points. 
 
 
@@ -257,6 +252,13 @@ ggplot() +
 
 ## INLA Modelling
 
+We will compare 4 different modelling approaches. All approaches are hurdle models where occurrence is modelled using the binomial distribution and abundance is modelled using the negative binomial distribution: 
+
+1. null: Intercept-only model
+2. habitat: Proportion of suitable habitat (non-sand substrate) as a fixed non-spatial covariate
+3. spatial: Spatial structure included as a random field (SPDE Matern correlation)
+4. joint: Proportion of suitable habitat is estimated using a random spatial field and Gaussian distribution; this is then used in both the occurrence and abundance part of the hurdle model as a fixed spatial factor. This allows us to estimate both habitat suitability and abundance at the same time. 
+
 ### INLA Mesh
 
 We need a spatial mesh to create the spatial random field. This will be restricted to the convex hull around the prediction points. 
@@ -265,7 +267,7 @@ We need a spatial mesh to create the spatial random field. This will be restrict
 ```r
 # Create mesh
 pred_dat <- pred_dat %>% as.matrix
-ch <- inla.nonconvex.hull(pred_dat[,1:2], convex = -0.05)
+ch <- inla.nonconvex.hull(rbind(pred_dat, select(dat, x = longitude, y = latitude)) %>% as.matrix, convex = -0.05)
 ```
 
 ```
@@ -293,7 +295,7 @@ mesh$n
 ```
 
 ```
-## [1] 233
+## [1] 326
 ```
 
 ```r
@@ -378,7 +380,14 @@ m_null <- inla(f_null, family = c("nbinomial", "binomial"),
                       control.predictor = list(A = inla.stack.A(stack_yz)),
                       control.compute = list(dic = TRUE),
                       control.inla = list(strategy = "laplace"))
+```
 
+```
+## Warning: 'rBind' is deprecated.
+##  Since R version 3.2.0, base's rbind() should work fine with S4 objects
+```
+
+```r
 # 2. Habitat only (fixed effect)
 f_habitat <- alldata ~ -1 + z_intercept + y_intercept + p_suitable
 
@@ -447,10 +456,10 @@ map_dfr(mods, function(x) {
 
 model      Abundance   occurrence
 --------  ----------  -----------
-joint       2103.732     923.9562
-spatial     2105.149     924.7838
-habitat     2151.480     975.4489
-null        2162.977     973.3448
+joint       2106.861     927.3106
+spatial     2109.251     925.4781
+habitat     2151.477     975.4491
+null        2162.974     973.2475
 
 Joint model outperforms all others for both abundance and occurrence, based on DIC. NB not much improvement between spatial and joint (which is the spatial model that includes habitat), but the habitat part of the model requires improvement. 
 
@@ -500,7 +509,7 @@ occurrence <- ggplot(pred_vals %>% filter(measure == "Occurrence"), aes(x = as.f
 plot_grid(density, occurrence)
 ```
 
-![](sea_cucumber_spatial_hurdle_files/figure-html/unnamed-chunk-1-1.png)<!-- -->
+![](sea_cucumber_spatial_hurdle_files/figure-html/pred_obs-1.png)<!-- -->
 
 ```r
 save_plot(density, filename = "figures/density_performance.jpg")
@@ -509,7 +518,9 @@ save_plot(density, filename = "figures/occurrence_performance.jpg")
 
 Both spatial and joint outperform the null and habitat only models, with the joint (habitat and spatial) model performing best (again, only marginally). No models are predicting the full range of abundance, and the high predicted values carry a lot of uncertainty. 
 
-### Prediction of the response
+## Prediction of the response
+
+All predictions use the joint model.
 
 
 ```r
@@ -547,7 +558,7 @@ pred_vals <- as.tibble(pred_dat) %>%
          habsd = inla.mesh.project(projgrid, field = apply(pred_hab, 1, sd)))
 ```
 
-#### Density predictions
+### Density predictions
 
 
 ```r
@@ -575,7 +586,7 @@ save_plot(plot_grid(ymean_plot, ysd_plot),
           base_height = 10)
 ```
 
-#### Occurrence predictions
+### Occurrence predictions
 
 
 ```r
@@ -603,7 +614,7 @@ save_plot(plot_grid(zmean_plot, zsd_plot),
           base_height = 10)
 ```
 
-#### Habitat proportion prediction
+### Habitat proportion prediction
 
 
 ```r
@@ -631,3 +642,10 @@ save_plot(plot_grid(habmean_plot, habsd_plot),
           base_height = 10)
 ```
 
+## To do
+
+1. Model habitat as multinomial: see [INLA FAQ](http://www.r-inla.org/faq#TOC-I-have-multinomial-data-but-I-cannot-find-the-multinomial-likelihood-isn-t-it-available-) on MN distribution. 
+
+2. Look into spatio-temporal mesh. Reasoning behind this is that date is a key factor affecting density, so to make more accurate predictions, need specific mesh for specific times of year. Speak to Luis about what would be most useful for this. 
+
+3. Expand to the full study site (currently cutting off some points for ease of plotting for poster)
