@@ -139,7 +139,7 @@ What do the sea cucumber densities look like.
 
 
 ```r
-ggplot(data = dat, aes(x = sc_density)) + 
+ggplot(data = dat, aes(x = sc_abundance)) + 
   geom_histogram(binwidth = 1)
 ```
 
@@ -240,12 +240,18 @@ depth_ras <- mask(depth_ras, map_sp, inverse = T)
 pred_dat <- as.data.frame(depth_ras, xy = TRUE) %>% 
   na.omit %>% select(x, y)
 
+# just for the poster
+dat_sml <- dat %>% filter(longitude >= bounds[1], 
+                          longitude <= bounds[3], 
+                          latitude >= bounds[2], 
+                          latitude <= bounds[4])
 ggplot() + 
   geom_sf(data=map_sf, fill = "grey", colour = "grey") +
-  geom_point(data = dat %>% arrange(sc_density), 
-             aes(x = longitude, y = latitude, colour = sc_density), size = 1.75) +
-  scale_colour_viridis_c(name = "Sea Cucumber Density") + 
-  theme(axis.title = element_blank())
+  geom_point(data = dat_sml %>% arrange(sc_abundance), 
+             aes(x = longitude, y = latitude, colour = sc_abundance), size = 3) +
+  scale_colour_viridis_c(name = "Sea Cucumber Abundance") + 
+  theme(axis.title = element_blank(),
+        legend.position = "bottom")
 ```
 
 ![](sea_cucumber_spatial_hurdle_files/figure-html/spatial_data-1.png)<!-- -->
@@ -380,14 +386,7 @@ m_null <- inla(f_null, family = c("nbinomial", "binomial"),
                       control.predictor = list(A = inla.stack.A(stack_yz)),
                       control.compute = list(dic = TRUE),
                       control.inla = list(strategy = "laplace"))
-```
 
-```
-## Warning: 'rBind' is deprecated.
-##  Since R version 3.2.0, base's rbind() should work fine with S4 objects
-```
-
-```r
 # 2. Habitat only (fixed effect)
 f_habitat <- alldata ~ -1 + z_intercept + y_intercept + p_suitable
 
@@ -444,7 +443,7 @@ map_dfr(mods, function(x) {
     group_by(family) %>% 
     summarise(dic = sum(dic)) %>% 
     filter(family %in% c(1, 2)) %>% 
-    mutate(measure = c("Abundance", "occurrence"))
+    mutate(measure = c("Abundance", "Occurrence"))
 }, .id = "model") %>% 
   select(-family) %>% 
   spread(measure, dic) %>% 
@@ -454,7 +453,7 @@ map_dfr(mods, function(x) {
 
 
 
-model      Abundance   occurrence
+model      Abundance   Occurrence
 --------  ----------  -----------
 joint       2106.861     927.3106
 spatial     2109.251     925.4781
@@ -558,33 +557,30 @@ pred_vals <- as.tibble(pred_dat) %>%
          habsd = inla.mesh.project(projgrid, field = apply(pred_hab, 1, sd)))
 ```
 
-### Density predictions
+### Abundance predictions
 
 
 ```r
-ymean_plot <- ggplot() + 
+ggplot() + 
   geom_sf(data = map_sf, colour = "lightgrey", fill = "lightgrey") + 
-  geom_raster(data = pred_vals, aes(x = x, y = y, fill = ymean/100)) + 
-  scale_fill_viridis_c(name = "Density\n(mean)") + 
-  labs(x = "", y = "")
+  geom_raster(data = pred_vals, aes(x = x, y = y, fill = ymean)) + 
+  scale_fill_viridis_c(name = "Abundance (mean)") + 
+  labs(x = "", y = "") + 
+  theme(legend.position = "bottom")
+```
 
-ysd_plot <- ggplot() + 
+![](sea_cucumber_spatial_hurdle_files/figure-html/abund_plot-1.png)<!-- -->
+
+```r
+ggplot() + 
   geom_sf(data = map_sf, colour = "lightgrey", fill = "lightgrey") +
   geom_raster(data = pred_vals, aes(x = x, y = y, fill = ysd/100)) + 
-  scale_fill_viridis_c(name = "Density\n(SD)") + 
-  labs(x = "", y = "")
-
-plot_grid(ymean_plot, ysd_plot)
+  scale_fill_viridis_c(name = "Abundance (SD)") + 
+  labs(x = "", y = "") + 
+  theme(legend.position = "bottom")
 ```
 
-![](sea_cucumber_spatial_hurdle_files/figure-html/density_plot-1.png)<!-- -->
-
-```r
-save_plot(plot_grid(ymean_plot, ysd_plot), 
-          filename = "figures/density.jpg", 
-          base_width = 15, 
-          base_height = 10)
-```
+![](sea_cucumber_spatial_hurdle_files/figure-html/abund_plot-2.png)<!-- -->
 
 ### Occurrence predictions
 
@@ -618,29 +614,26 @@ save_plot(plot_grid(zmean_plot, zsd_plot),
 
 
 ```r
-habmean_plot <- ggplot() + 
+ggplot() + 
   geom_sf(data = map_sf, colour = "lightgrey", fill = "lightgrey") +
   geom_raster(data = pred_vals, aes(x = x, y = y, fill = habmean)) + 
-  scale_fill_viridis_c(name = "Habitat proportion\n(mean)") + 
-  labs(x = "", y = "")
-
-habsd_plot <- ggplot() + 
-  geom_sf(data = map_sf, colour = "lightgrey", fill = "lightgrey") +
-  geom_raster(data = pred_vals, aes(x = x, y = y, fill = habsd)) + 
-  scale_fill_viridis_c(name = "Habitat proportion\n(SD)") + 
-  labs(x = "", y = "")
-
-plot_grid(habmean_plot, habsd_plot)
+  scale_fill_viridis_c(name = "Habitat proportion (mean)") + 
+  labs(x = "", y = "") + 
+  theme(legend.position = "bottom")
 ```
 
 ![](sea_cucumber_spatial_hurdle_files/figure-html/habitat_plot-1.png)<!-- -->
 
 ```r
-save_plot(plot_grid(habmean_plot, habsd_plot), 
-          filename = "figures/habitat.jpg", 
-          base_width = 15, 
-          base_height = 10)
+ggplot() + 
+  geom_sf(data = map_sf, colour = "lightgrey", fill = "lightgrey") +
+  geom_raster(data = pred_vals, aes(x = x, y = y, fill = habsd)) + 
+  scale_fill_viridis_c(name = "Habitat proportion (SD)") + 
+  labs(x = "", y = "") + 
+  theme(legend.position = "bottom")
 ```
+
+![](sea_cucumber_spatial_hurdle_files/figure-html/habitat_plot-2.png)<!-- -->
 
 ## To do
 
