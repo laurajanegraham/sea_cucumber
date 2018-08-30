@@ -23,6 +23,9 @@ library(tidyverse)
 
 # set up plotting options
 theme_set(theme_bw(base_size = 12))
+
+# Albers equal area coordinate reference system for Mexico:
+crs_ea_mex <- "+proj=aea +lat_1=14.5 +lat_2=32.5 +lat_0=24 +lon_0=-105 +x_0=0 +y_0=0 +ellps=GRS80 +datum=NAD83 +units=m +no_defs"
 ```
 
 ## Aim
@@ -39,51 +42,29 @@ We have data on sea cucumber density in a number of locations across a number of
 # substrate data - calculate from this a % suitable and Shannon evenness for each transect
 # (NB 0 = sand = not suitable; all other substrate types are suitable)
 substr_dat <- read_csv("data/substrate_data.csv") %>% 
-  mutate(date = dmy(date)) %>% 
-  group_by(site_name, date, transect) %>%
-  mutate(n_transect = max(row_number())) %>% 
-  group_by(site_name, date, transect, substrate_code) %>% 
-  summarise(count = n(), 
-            n_transect = mean(n_transect),
-            p = count / n_transect,
-            plogp = p*log(p, base = exp(1))) %>% 
-  mutate(p_suitable = case_when(substrate_code == 0 ~ 0, TRUE ~ p)) %>% 
-  group_by(site_name, date, transect) %>% 
-  summarise(shannon = (-(sum(plogp)))/log(4, base = exp(1)),
-            p_suitable = sum(p_suitable)) %>% 
-  group_by(site_name, transect) %>% 
-  summarise(shannon = mean(shannon), 
-            p_suitable = mean(p_suitable)) %>% 
-  mutate(p = (p_suitable - min(p_suitable)) / (max(p_suitable) - min(p_suitable)),
-         p_logit = log((p + 0.1) / (1 - p + 0.1), base = exp(1)))
-
-# alternative substr_dat - this one a column per substrate with percentages (or perhaps counts)
-substr_dat2 <- read_csv("data/substrate_data.csv") %>% 
-  mutate(yday = yday(dmy(date))) %>% 
-  select(-site_name, -date) %>% 
-  mutate(idx = group_indices(., latitude, longitude, yday, transect))
+  mutate(longitude = -longitude) %>% 
+  group_by(latitude, longitude) %>% 
+  summarise(mean_substr = mean(substrate_code), 
+            sd_substr = sd(substrate_code)) %>% 
+  st_as_sf(coords = c("longitude", "latitude"), 
+           crs = 4326) %>% 
+  st_transform(crs_ea_mex)
 
 # sea cucumber abundance and some environmental variables
 dat <- read_csv("data/sea_cucumber_data.csv", na = c("", "NA", "ND")) %>% 
-  # get the substrate type
-  inner_join(substr_dat) %>% 
-  # select the appropriate variables and omit and remaining NAs
-  select(latitude, longitude, site_name, date, air_temp, diss_o2, 
-         sc_density, shannon, p_suitable, p_logit) %>% 
+  group_by(latitude, longitude) %>% 
+  summarise(sc_density = mean(sc_density, na.rm = TRUE)) %>% 
   na.omit %>% 
-  # create derived variables for day of year and y/z for the hurdle model and fix longitude (given as E)
-  mutate(date = dmy(date), 
-         yday = yday(date),
-         longitude = -longitude,
+  # create y/z for the hurdle model and fix longitude (given as E)
+  mutate(longitude = -longitude,
          sc_abundance = round(sc_density*100),
          z = case_when(sc_abundance == 0 ~ 0, 
                        TRUE ~ 1),
          y = case_when(sc_abundance == 0 ~ NaN,
                        TRUE ~ sc_abundance) %>% as.integer) %>% 
-  select(-date)
-
-# narrow version of dataset for plotting
-dat_narrow <- dat %>% gather(covariate, value, -latitude, -longitude, -yday, -z, -y, -sc_abundance)
+  st_as_sf(coords = c("longitude", "latitude"), 
+           crs = 4326) %>% 
+  st_transform(crs_ea_mex)
 ```
 
 We have `r nrow(dat)` observations of sea cucumber densities. NB to avoid complications, we will be modelling as abundances (density * 100) and then converting the predictions back to densities. 
@@ -112,21 +93,27 @@ bounds <- c(xmin = -114, ymin = 28, xmax = -112.5, ymax = 29.51)
 
 # load in the depth data and crop to analysis region
 depth_sf <- st_read("data/30m_isobath_baja_california.kml") %>% 
-  st_cast("POLYGON") %>% st_buffer(0) %>% st_crop(bounds)
+  st_crop(bounds) %>% 
+  st_cast("POLYGON") %>% 
+  st_zm() %>% 
+  st_transform(crs_ea_mex) %>% 
+  st_buffer(0)
 
 # load in the land shapefile and crop to analysis region
 map_sf <- st_read("data/bc_shp/bc_municipio.shp") %>% 
-  st_crop(bounds)
+  st_crop(bounds) %>% 
+  st_transform(crs_ea_mex)
+
+# remove the intersection of land and depth
+depth_sf <- st_difference(depth_sf, st_combine(map_sf)) %>% st_cast("POLYGON")
 
 depth_sp <- as(depth_sf, "Spatial")
-map_sp <- as(map_sf, "Spatial")
 
 # create a prediction surface
-ras <- raster(extent(depth_sp), crs = crs(depth_sp))
+ras <- raster(extent(depth_sp), crs = crs_ea_mex)
 
-res(ras) <- 0.001
-depth_ras <- rasterize(depth_sp, ras)
-depth_ras <- mask(depth_ras, map_sp, inverse = T)
+res(ras) <- 10
+depth_ras <- fasterize::fasterize(depth_sf, ras)
 
 pred_dat <- as.data.frame(depth_ras, xy = TRUE) %>% 
   na.omit %>% select(x, y)
