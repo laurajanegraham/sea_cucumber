@@ -31,25 +31,6 @@ dat <- read_csv("data/sea_cucumber_data.csv", na = c("", "NA", "ND")) %>%
   st_transform(crs_ea_mex)
 ```
 
-```
-## Parsed with column specification:
-## cols(
-##   site_name = col_character(),
-##   latitude = col_double(),
-##   longitude = col_double(),
-##   date = col_character(),
-##   air_temp = col_double(),
-##   wind = col_double(),
-##   salinity = col_double(),
-##   diss_o2 = col_double(),
-##   transect = col_integer(),
-##   depth = col_double(),
-##   toc = col_double(),
-##   sc_density = col_double(),
-##   longitude2 = col_double()
-## )
-```
-
 We have 1107 observations of sea cucumber densities. These are from 118 sites, collected between 2014-10-16 and 2015-09-12.
 
 ### Data exploration
@@ -97,15 +78,6 @@ depth_sf <- st_read("data/30m_isobath_baja_california.kml") %>%
 ## proj4string:    +proj=longlat +datum=WGS84 +no_defs
 ```
 
-```
-## although coordinates are longitude/latitude, st_intersection assumes that they are planar
-```
-
-```
-## Warning: attribute variables are assumed to be spatially constant
-## throughout all geometries
-```
-
 ```r
 # load in the land shapefile and crop to analysis region
 map_sf <- st_read("data/bc_shp/bc_municipio.shp") %>% 
@@ -123,26 +95,10 @@ map_sf <- st_read("data/bc_shp/bc_municipio.shp") %>%
 ## proj4string:    +proj=longlat +ellps=WGS84 +no_defs
 ```
 
-```
-## although coordinates are longitude/latitude, st_intersection assumes that they are planar
-```
-
-```
-## Warning: attribute variables are assumed to be spatially constant
-## throughout all geometries
-```
-
 ```r
 # remove the intersection of land and depth
 depth_sf <- st_difference(depth_sf, st_combine(map_sf)) %>% st_cast("MULTIPOLYGON")
-```
 
-```
-## Warning: attribute variables are assumed to be spatially constant
-## throughout all geometries
-```
-
-```r
 depth_sp <- as(depth_sf, "Spatial")
 
 # create a prediction surface
@@ -150,27 +106,45 @@ ras <- raster(extent(depth_sp), crs = crs_ea_mex)
 
 res(ras) <- 100
 depth_ras <- fasterize::fasterize(depth_sf %>% st_cast("POLYGON"), ras)
-```
 
-```
-## Warning in st_cast.sf(., "POLYGON"): repeating attributes for all sub-
-## geometries for which they may not be constant
-```
-
-```r
 pred_dat <- as.data.frame(depth_ras, xy = TRUE) %>% 
   na.omit %>% select(x, y)
 
-ggplot() + 
-  geom_sf(data=map_sf, fill = "grey", colour = "grey") +
-  geom_sf(data = dat %>% arrange(sc_density), 
-             aes(colour = sc_density), size = 3) +
-  scale_colour_viridis_c(name = "Sea Cucumber Density") + 
-  theme(axis.title = element_blank(),
-        legend.position = "bottom")
+f <- list.files("data/quota_shp/", pattern = ".shp", full.names = TRUE)
+
+quotas <- st_read("data/quota_estates.shp")
+```
+
+```
+## Reading layer `quota_estates' from data source `C:\Users\lg1u16\GIT_PROJECTS\SIDEPROJ\sea_cucumber\data\quota_estates.shp' using driver `ESRI Shapefile'
+## Simple feature collection with 9 features and 2 fields
+## geometry type:  POLYGON
+## dimension:      XY
+## bbox:           xmin: -834829.8 ymin: 467940.9 xmax: -747391.8 ymax: 652551.7
+## epsg (SRID):    NA
+## proj4string:    +proj=aea +lat_1=14.5 +lat_2=32.5 +lat_0=24 +lon_0=-105 +x_0=0 +y_0=0 +ellps=GRS80 +units=m +no_defs
+```
+
+```r
+ggplot() + geom_sf(data = quotas, aes(fill = Estate))
 ```
 
 ![](sea_cucumber_spatial_hurdle_files/figure-html/spatial_data-1.png)<!-- -->
+
+```r
+quotas_sp <- as(quotas, "Spatial")
+
+study_site <- ggplot() + 
+  geom_sf(data=map_sf, fill = "grey", colour = "grey") +
+  geom_sf(data = quotas) +
+  geom_sf(data = dat %>% arrange(sc_density), 
+             aes(colour = sc_density)) +
+  scale_colour_viridis_c(name = "Sea Cucumber\nDensity") + 
+  theme(axis.title = element_blank(),
+        panel.grid.major=element_line(colour="transparent")) 
+
+ggsave(plot = study_site, filename = "figures/study_site.jpg", dpi = 300, width = 140, units = "mm")
+```
 
 
 ```r
@@ -207,14 +181,7 @@ pred_dat <- pred_dat %>% as.matrix
 coords_dat <- st_coordinates(dat)
 
 ch <- inla.nonconvex.hull(rbind(pred_dat, coords_dat) %>% as.matrix, convex = -0.05)
-```
 
-```
-## Warning: 'cBind' is deprecated.
-##  Since R version 3.2.0, base's cbind() should work fine with S4 objects
-```
-
-```r
 # NB this mesh could be smaller - when we've got a good analysis going, need to change it. 
 mesh <- inla.mesh.2d(boundary = ch,
                      #offset = 0.1,
@@ -255,8 +222,7 @@ nobs = nrow(dat)
 dat <- mutate(dat, site_name = as.numeric(as.factor(site_name)),
               date = as.numeric(date))
 stack_y <- inla.stack(tag = "est.y", 
-                      data = list(density = dat$y, # single model
-                                  alldata = cbind(dat$y, NA)), # joint model
+                      data = list(alldata = cbind(dat$y, NA), link = 1), 
                       A = list(A, A, 1, 1, 1),
                       effects = list(
                         y_field = 1:spde$n.spde,
@@ -266,8 +232,7 @@ stack_y <- inla.stack(tag = "est.y",
                         date = dat$date))
 
 stack_z <- inla.stack(tag = "est.z", 
-                      data = list(occurrence = dat$z, # single model
-                                  alldata = cbind(NA, dat$z)), # joint model
+                      data = list(alldata = cbind(NA, dat$z), link = 2), 
                       A = list(A, 1, 1, 1),
                       effects = list(
                         z_field = 1:spde$n.spde,
@@ -290,14 +255,7 @@ m_null <- inla(f_null, family = c("gamma", "binomial"),
                data = inla.stack.data(stack_yz),
                control.predictor = list(A = inla.stack.A(stack_yz)),
                control.compute = list(dic = TRUE))
-```
 
-```
-## Warning: 'rBind' is deprecated.
-##  Since R version 3.2.0, base's rbind() should work fine with S4 objects
-```
-
-```r
 f_nulls <- alldata ~ -1 + z_intercept + y_intercept + 
   f(site, model = "iid")
 m_nulls <- inla(f_nulls, family = c("gamma", "binomial"),
@@ -319,7 +277,7 @@ f_times <- alldata ~ -1 + z_intercept + y_intercept +
 m_times <- inla(f_times, family = c("gamma", "binomial"),
                 data = inla.stack.data(stack_yz),
                 control.predictor = list(A = inla.stack.A(stack_yz)),
-                control.compute = list(dic = TRUE))
+                control.compute = list(dic = TRUE, config = TRUE))
 
 # 3. Space only (random spatial field)
 f_spatial <- alldata ~ -1 + z_intercept + y_intercept + 
@@ -396,6 +354,7 @@ map_dfr(mods, function(x) {
   select(-family) %>% 
   spread(measure, dic) %>% 
   arrange(Abundance) %>% 
+  write_csv("results/dic_table.csv") %>% 
   kable
 ```
 
@@ -420,7 +379,7 @@ dat <- dat %>% st_set_geometry(NULL)
 idy <- which(dat[,"y"] > 0)
 idz <- which(!is.na(dat$z))
 
-pred_vals <- map_dfr(mods, function(x) {
+pred_vals <- map_dfr(mods[c("nulls", "sptemps")], function(x) {
   df <- tibble(predicted = x$summary.fitted.values$mean, 
              pred_sd = x$summary.fitted.values$sd)
   df[idy, "measure"] <- "Density"
@@ -430,11 +389,8 @@ pred_vals <- map_dfr(mods, function(x) {
   return(df)
 }, .id = "model") %>% na.omit %>% 
   mutate(model = factor(model,
-                        levels = c("null", "time", "spatial", "sptemp", 
-                                   "nulls", "times", "spatials", "sptemps"),
-                        labels = c("null", "temporal", "spatial", "spatio-temporal", 
-                                   "null + site", "temporal + site", "spatial + site", 
-                                   "spatio-temporal + site")))
+                        levels = c("nulls", "sptemps"),
+                        labels = c("null", "spatial")))
 
 corrs <- pred_vals %>% 
   filter(measure == "Density") %>% 
@@ -450,28 +406,98 @@ density <- ggplot(pred_vals %>% filter(measure == "Density"),
   geom_point() + 
   geom_errorbar(aes(ymin = predicted - pred_sd, ymax = predicted + pred_sd), width = 0) + 
   annotate("text", x = 0.3, y = 0.4, label = paste0("r = ", round(corrs$corr, 3))) +
-  facet_wrap(~ model, nrow = 2) + 
+  facet_wrap(~ model, nrow = 1) + 
   geom_smooth(method = "lm")
 
 occurrence <- ggplot(pred_vals %>% filter(measure == "Occurrence"), 
                      aes(x = as.factor(observed), y = predicted)) + 
   geom_boxplot() + 
-  facet_wrap(~ model, nrow = 2) + 
+  facet_wrap(~ model, nrow = 1) + 
   labs(x = "observed")
 
-density + occurrence
+density + occurrence + plot_layout(nrow = 2)
 ```
 
 ![](sea_cucumber_spatial_hurdle_files/figure-html/pred_obs-1.png)<!-- -->
+
+### Model summary
+
+
+```r
+summary(mods$sptemps)
+```
+
+```
+## 
+## Call:
+## c("inla(formula = f_sptemps, family = c(\"gamma\", \"binomial\"), data = inla.stack.data(stack_yz), ",  "    control.compute = list(dic = TRUE, config = TRUE), control.predictor = list(A = inla.stack.A(stack_yz)))" )
+## 
+## Time used:
+##  Pre-processing    Running inla Post-processing           Total 
+##          1.6381        394.8718          1.6211        398.1310 
+## 
+## Fixed effects:
+##                mean     sd 0.025quant 0.5quant 0.975quant    mode   kld
+## z_intercept  0.3928 0.1653     0.0572   0.3957     0.7127  0.4012 0.000
+## y_intercept -3.3391 0.2771    -3.6044  -3.3357    -3.1058 -3.3283 0.089
+## 
+## Random effects:
+## Name	  Model
+##  date   RW2 model 
+## site   IID model 
+## z_field   SPDE2 model 
+## y_field   SPDE2 model 
+## yc_field   Copy 
+## 
+## Model hyperparameters:
+##                                                      mean        sd
+## Precision parameter for the Gamma observations     3.1119 1.764e-01
+## Precision for date                             39764.5662 2.119e+04
+## Precision for site                                 5.2277 1.102e+00
+## Theta1 for z_field                                 5.8130 7.052e-01
+## Theta2 for z_field                                -7.1503 4.478e-01
+## Theta1 for y_field                                 9.9323 2.124e+00
+## Theta2 for y_field                                -8.2370 2.099e+00
+## Beta for yc_field                                  0.4575 9.680e-02
+##                                                0.025quant   0.5quant
+## Precision parameter for the Gamma observations     2.7797     3.1068
+## Precision for date                             12510.5731 35321.3577
+## Precision for site                                 3.4016     5.1131
+## Theta1 for z_field                                 4.4402     5.8075
+## Theta2 for z_field                                -8.0199    -7.1549
+## Theta1 for y_field                                 5.6343     9.9880
+## Theta2 for y_field                               -11.9589    -8.3938
+## Beta for yc_field                                  0.2677     0.4572
+##                                                0.975quant       mode
+## Precision parameter for the Gamma observations      3.474     3.0967
+## Precision for date                              92994.482 27391.4353
+## Precision for site                                  7.713     4.8913
+## Theta1 for z_field                                  7.212     5.7880
+## Theta2 for z_field                                 -6.262    -7.1714
+## Theta1 for y_field                                 13.972    10.1868
+## Theta2 for y_field                                 -3.769    -8.9724
+## Beta for yc_field                                   0.648     0.4564
+## 
+## Expected number of effective parameters(std dev): 110.64(5.912)
+## Number of equivalent replicates : 16.07 
+## 
+## Deviance Information Criterion (DIC) ...: -1777.60
+## Effective number of parameters .........: 113.14
+## 
+## Marginal log-Likelihood:  843.65 
+## Posterior marginals for linear predictor and fitted values computed
+```
 
 ## Prediction of the response
 
 All predictions use the spatio-temporal model with random effect of site.
 
+NB Results in the paper use 100000 samples from the posterior. We have reduced this to 10 here in the interests of computational time. 
+
 
 ```r
 # get the id's for each field
-samples <- inla.posterior.sample(n = 100000, result = mods$sptemps)
+samples <- inla.posterior.sample(n = 10, result = mods$sptemps)
 
 ids <- lapply(c("y_intercept", "y_field", "yc_field",
                 "z_intercept", "z_field"),
@@ -484,10 +510,8 @@ predict_y <- function(s) exp(s$latent[ids[[1]], 1] +
 predict_z <- function(s) 1/ (1 + exp(-(s$latent[ids[[4]], 1] + 
                                         s$latent[ids[[5]], 1])))
 
-
 pred_y <- sapply(samples, predict_y)
 pred_z <- sapply(samples, predict_z)
-
 
 projgrid <- inla.mesh.projector(mesh, loc = pred_dat)
 
@@ -507,16 +531,20 @@ pred_vals <- as.tibble(pred_dat) %>%
 ymean_plot <- ggplot() + 
   geom_sf(data = map_sf, colour = "lightgrey", fill = "lightgrey") + 
   geom_raster(data = pred_vals, aes(x = x, y = y, fill = ymean)) + 
-  scale_fill_viridis_c(name = "Density (mean)") + 
+  scale_fill_viridis_c(name = "Density\n(mean)") + 
   labs(x = "", y = "") 
 
 yci_plot <- ggplot() + 
   geom_sf(data = map_sf, colour = "lightgrey", fill = "lightgrey") +
   geom_raster(data = pred_vals, aes(x = x, y = y, fill = yuci - ylci)) + 
-  scale_fill_viridis_c(name = "Density (95% CI)") + 
+  scale_fill_viridis_c(name = "Density\n(95% CI)") + 
   labs(x = "", y = "")
 
-ymean_plot + yci_plot
+res_plot <- ymean_plot + yci_plot + plot_annotation(tag_levels = "a", tag_suffix = ")")
+
+ggsave(plot = res_plot, filename = "~/Google Drive/SIDEPROJ/Papers/sea cucumber/results.jpg", dpi = 300, width = 140, height = 60, units = "mm")
+
+res_plot
 ```
 
 ![](sea_cucumber_spatial_hurdle_files/figure-html/density_plot-1.png)<!-- -->
@@ -526,22 +554,21 @@ ymean_plot + yci_plot
 
 ```r
 zmean_plot <- ggplot() + 
-  geom_sf(data = map_sf, colour = "lightgrey", fill = "lightgrey") +
+  geom_sf(data = map_sf, colour = "lightgrey", fill = "lightgrey") + 
   geom_raster(data = pred_vals, aes(x = x, y = y, fill = zmean)) + 
-  scale_fill_viridis_c(name = "Probability of\noccurrence\n(mean)") + 
-  labs(x = "", y = "")
+  scale_fill_viridis_c(name = "Occurrence (mean)") + 
+  labs(x = "", y = "") 
 
 zci_plot <- ggplot() + 
   geom_sf(data = map_sf, colour = "lightgrey", fill = "lightgrey") +
   geom_raster(data = pred_vals, aes(x = x, y = y, fill = zuci - zlci)) + 
-  scale_fill_viridis_c(name = "Probability of\noccurrence\n(95% CI)") + 
+  scale_fill_viridis_c(name = "Occurrence (95% CI)") + 
   labs(x = "", y = "")
 
-zmean_plot + zci_plot
+zmean_plot + zci_plot + plot_annotation(tag_levels = "a", tag_suffix = ")")
 ```
 
-![](sea_cucumber_spatial_hurdle_files/figure-html/occurrence_plot-1.png)<!-- -->
-
+![](sea_cucumber_spatial_hurdle_files/figure-html/occ_plot-1.png)<!-- -->
 ## Comparison against quotas
 
 We use the shapes from Luis to make predictions of units within the estates for comparison against granted quotas. 
@@ -550,91 +577,114 @@ We use the shapes from Luis to make predictions of units within the estates for 
 ```r
 density_mean <- pred_vals %>% 
   select(x, y, ymean) %>% 
-  mutate(ymean = ymean * 100) %>% 
+  mutate(ymean = ymean * 100 * 100) %>% 
   rasterFromXYZ(crs = crs_ea_mex)
 
 density_lci <- pred_vals %>% 
   select(x, y, ylci) %>% 
-  mutate(ylci = ylci * 100) %>% 
+  mutate(ylci = ylci * 100 * 100) %>% 
   rasterFromXYZ(crs = crs_ea_mex)
 
 density_uci <- pred_vals %>% 
   select(x, y, yuci) %>% 
-  mutate(yuci = yuci * 100) %>% 
+  mutate(yuci = yuci * 100 * 100) %>% 
   rasterFromXYZ(crs = crs_ea_mex)
 
 density <- stack(list(mean = density_mean, 
                  lci = density_lci, 
                  uci = density_uci))
-```
 
+# for the null models
+ymean <- exp(mods$times$summary.fixed[2, 1]) * 100 * 100
+ylci <- exp(mods$times$summary.fixed[2, 3]) * 100 * 100
+yuci <- exp(mods$times$summary.fixed[2, 5]) * 100 * 100
+nulldensity_mean <- density_mean
+nulldensity_lci <- density_lci
+nulldensity_uci <- density_uci
+values(nulldensity_mean) <- ifelse(is.na(values(nulldensity_mean)), NA, ymean)
+values(nulldensity_lci) <- ifelse(is.na(values(nulldensity_lci)), NA, ylci)
+values(nulldensity_uci) <- ifelse(is.na(values(nulldensity_uci)), NA, yuci)
 
-```r
-f <- list.files("data/quota_shp/", pattern = ".shp", full.names = TRUE)
-
-quotas <- rbind(st_read(f[1]) %>% select(NAME, geometry), 
-                st_read(f[2]) %>% select(NAME, geometry), 
-                st_read(f[3]) %>% select(NAME, geometry)) %>% 
-  st_transform(crs_ea_mex)
-```
-
-```
-## Reading layer `Pepino-Hnos Fuerte SPR de RL' from data source `C:\Users\lg1u16\GIT_PROJECTS\SIDEPROJ\sea_cucumber\data\quota_shp\Pepino-Hnos Fuerte SPR de RL.shp' using driver `ESRI Shapefile'
-## Simple feature collection with 1 feature and 2 fields
-## geometry type:  POLYGON
-## dimension:      XY
-## bbox:           xmin: -113.2022 ymin: 29.06086 xmax: -113.0984 ymax: 29.15005
-## epsg (SRID):    4326
-## proj4string:    +proj=longlat +ellps=WGS84 +no_defs
-## Reading layer `Pepino-Joaquin Arturo Ayala' from data source `C:\Users\lg1u16\GIT_PROJECTS\SIDEPROJ\sea_cucumber\data\quota_shp\Pepino-Joaquin Arturo Ayala.shp' using driver `ESRI Shapefile'
-## Simple feature collection with 1 feature and 2 fields
-## geometry type:  POLYGON
-## dimension:      XY
-## bbox:           xmin: -113.625 ymin: 29.52507 xmax: -113.5241 ymax: 29.60842
-## epsg (SRID):    4326
-## proj4string:    +proj=longlat +ellps=WGS84 +no_defs
-## Reading layer `poligonos pepino' from data source `C:\Users\lg1u16\GIT_PROJECTS\SIDEPROJ\sea_cucumber\data\quota_shp\poligonos pepino.shp' using driver `ESRI Shapefile'
-## Simple feature collection with 7 features and 3 fields
-## geometry type:  POLYGON
-## dimension:      XY
-## bbox:           xmin: -113.6568 ymin: 27.99996 xmax: -112.675 ymax: 29.28334
-## epsg (SRID):    4326
-## proj4string:    +proj=longlat +ellps=WGS84 +no_defs
-```
-
-```r
-ggplot() + geom_sf(data = quotas, aes(fill = NAME))
-```
-
-![](sea_cucumber_spatial_hurdle_files/figure-html/quota_shapes-1.png)<!-- -->
-
-```r
-quotas_sp <- as(quotas, "Spatial")
+nulldensity <- stack(list(nullmean = nulldensity_mean,
+                          nulllci = nulldensity_lci,
+                          nulluci = nulldensity_uci))
 ```
 
 
 ```r
 quota_preds <- raster::extract(density, quotas_sp, fun = sum, na.rm = TRUE) %>% as_tibble
-
+quota_nullpreds <- raster::extract(nulldensity, quotas_sp, fun = sum, na.rm = TRUE) %>% as_tibble
 quota_area <- raster::extract(density, quotas_sp) %>% 
   map_dfr(function(x) {
     tibble(suitable_area = x %>% na.omit %>% nrow)
   })
 
-bind_cols(quotas, quota_preds, quota_area) %>% st_set_geometry(NULL) %>% write_csv("results/quotas.csv") %>% kable
+bind_cols(quotas, quota_preds, quota_nullpreds, quota_area) %>% 
+  st_set_geometry(NULL) %>% 
+  mutate(uniform = 0.3*10^4*total_area*0.1,
+         smean = mean*0.1,
+         slci = lci*0.1,
+         nmean = nullmean*0.1,
+         nlci = nulllci*0.1) %>% 
+  arrange(Estate) %>% 
+  select(Estate, total_area, suitable_area, # info on estates
+         mean, lci, uci, # spatial model estimates
+         nullmean, nulllci, nulluci, # non-spatial model estimates
+         uniform, smean, slci, nmean, nlci) %>% # quotas
+  write_csv("results/quotas.csv") %>% 
+  kable
 ```
 
 
 
-NAME                                            mean         lci         uci   suitable_area
-----------------------------------------  ----------  ----------  ----------  --------------
-PEPINO-Hnos. Fuerte SPR de RL               3077.023   1086.0724    6868.899             787
-Pepino-Joaquin Arturo Ayala                 3374.111   1322.0940    7154.537             889
-Pepino-Pescadores del Barril-1             18398.221   6232.7167   42058.424            5127
-Pepino-Pescadores del Barril-2              1726.711    703.2547    3529.801             517
-Pepino-Buzos de Bahía                      11148.385   5637.1713   20442.025            2349
-Pepino-Buzosy PescadoresdeBC                4950.083   1961.6010   10546.602            1105
-Pepino-Maria del Socorro Garcia Alvares     5529.782   2439.0929   10943.744            1219
-Pepino-Marina Canizales Garcia              9418.068   3690.8638   20118.285            2367
-Pepino-MorenoLeonGuillermo                  5449.896   1984.7176   11900.968            1576
+Estate    total_area   suitable_area        mean         lci         uci    nullmean     nulllci     nulluci      uniform       smean        slci       nmean        nlci
+-------  -----------  --------------  ----------  ----------  ----------  ----------  ----------  ----------  -----------  ----------  ----------  ----------  ----------
+1           2730.271             787    218722.5   133520.28    356538.4    300223.2    267547.1    336175.9     819081.4    21872.25   13352.028    30022.32    26754.71
+2           8276.371             889    333786.2   165443.02    486236.3    339133.9    302222.8    379746.3    2482911.4    33378.62   16544.302    33913.39    30222.28
+3          17363.769            2349   1080519.9   746873.35   1608039.9    896091.8    798561.8   1003401.6    5209130.6   108051.99   74687.335    89609.18    79856.18
+4          14141.100            1105    513354.0   254556.11    908599.4    421533.2    375653.8    472013.1    4242329.9    51335.40   25455.611    42153.32    37565.38
+5           6577.154            1219    507856.2   322342.21    813712.9    465021.7    414409.1    520709.5    1973146.1    50785.62   32234.221    46502.17    41440.91
+6          17134.589            2367   1052824.8   525012.72   1613049.3    902958.4    804681.1   1011090.5    5140376.8   105282.48   52501.272    90295.84    80468.11
+7          10100.025            1576    601858.5   315727.00   1007263.2    601209.3    535774.1    673206.0    3030007.6    60185.85   31572.700    60120.93    53577.41
+8          34743.706            5127   1950698.2   943459.76   3316642.1   1955837.6   1742965.7   2190055.4   10423111.7   195069.82   94345.976   195583.76   174296.57
+9           2860.709             517    191183.1    93823.17    305127.0    197224.1    175758.4    220842.3     858212.7    19118.31    9382.317    19722.41    17575.84
+
+Plot showing the estimated quotas (mean and LCI) against the granted quotas. 
+
+
+```r
+dat <- bind_cols(read_csv("results/quotas.csv"), 
+                 tibble(granted_quota = c(6750, 6750, 6250, 6750, 6250, 47088, 27390, 24315, 12158))) %>% 
+  mutate(Estate = factor(Estate)) %>% 
+  mutate(legend = " Granted Quota")
+
+                 
+table1 <- dat %>% 
+  select(Estate, total_area, suitable_area, mean, lci, uci, nullmean, nulllci, nulluci) %>% 
+  write_csv("results/table1.csv")
+
+fig3_dat <- dat %>% 
+  select(Estate, spatial_mean = mean, spatial_lci = lci, nonspatial_mean = nullmean, nonspatial_lci = nulllci) %>% 
+  mutate_at(vars(spatial_mean, spatial_lci, nonspatial_mean, nonspatial_lci), .funs = function(x) x*0.1) %>% 
+  gather(key, value, -Estate) %>%
+  separate(key, into = c("model", "measure")) %>% 
+  spread(measure, value) %>% 
+  mutate(Model = factor(model, levels = c("spatial", "nonspatial"), labels = c(" Spatial model (-95% CI)", " Non-spatial model (-95% CI)")))
+
+ggplot() + 
+  geom_bar(data = dat, aes(x = Estate, y = granted_quota, fill = legend), stat = "identity", colour = "black") + 
+  scale_fill_manual(values = "white") + 
+  geom_point(data = fig3_dat, aes(x = Estate, y = mean, shape = Model), position = position_dodge(1), size = 3) + 
+  geom_point(data = fig3_dat, aes(x = Estate, y = lci, group = Model), shape = 95, size = 2, position = position_dodge(1)) + 
+  geom_linerange(data = fig3_dat, aes(x = Estate, ymin = lci, ymax = mean, group = Model), position = position_dodge(1)) + 
+  ylab("Quota (in number of pieces of sea cucumber)") + 
+  theme(legend.position = c(0.15, 0.8),
+        legend.title = element_blank())
+```
+
+![](sea_cucumber_spatial_hurdle_files/figure-html/unnamed-chunk-1-1.png)<!-- -->
+
+```r
+ggsave(filename = "~/Google Drive/SIDEPROJ/Papers/sea cucumber/3_quotas.jpg", dpi = 300, width = 140, height = 80, units = "mm")
+```
 
