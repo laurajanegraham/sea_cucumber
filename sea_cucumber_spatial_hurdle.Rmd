@@ -3,7 +3,13 @@ title: 'Sea Cucumber: spatial hurdle model'
 author: "Laura Graham"
 output: 
   html_document: 
-    keep_md: true
+    df_print: kable
+    highlight: tango
+    keep_md: yes
+    theme: flatly
+params: 
+  range0: 100
+  pcprior: false
 ---
 
 ```{r setup, include=FALSE}
@@ -29,6 +35,10 @@ theme_set(theme_bw(base_size = 7) + theme(panel.grid = element_blank()))
 
 # Albers equal area coordinate reference system for Mexico:
 crs_ea_mex <- "+proj=aea +lat_1=14.5 +lat_2=32.5 +lat_0=24 +lon_0=-105 +x_0=0 +y_0=0 +ellps=GRS80 +datum=NAD83 +units=m +no_defs"
+
+# parameter input
+pcprior <- params$pcprior
+range0 <- params$range0
 ```
 
 ## Aim
@@ -40,7 +50,7 @@ In this analysis we want to create spatial estimates of sea cucumber abundance w
 ```{r load_data}
 # sea cucumber abundance and some environmental variables
 dat <- read_csv("data/sea_cucumber_data.csv", na = c("", "NA", "ND")) %>% 
-  select(site_name, latitude, longitude, date, sc_density) %>% 
+  select(site_name, transect, latitude, longitude, date, sc_density) %>% 
   mutate(longitude = -longitude,
          date = dmy(date),
          month = str_sub(date, 1, 7),
@@ -76,7 +86,7 @@ We only want to model and predict within the < 30m depth zone, so let's load thi
 bounds <- c(xmin = -114.5, ymin = 28, xmax = -112.5, ymax = 30)
 
 # load in the depth data and crop to analysis region
-depth_sf <- st_read("data/30m_isobath_baja_california.kml") %>% 
+depth_sf <- st_read("data/30m_isobath_baja_california.kml", quiet = TRUE) %>% 
   st_crop(bounds) %>% 
   st_cast("POLYGON") %>% 
   st_zm() %>% 
@@ -86,7 +96,7 @@ depth_sf <- st_read("data/30m_isobath_baja_california.kml") %>%
   st_cast("MULTIPOLYGON")
 
 # load in the land shapefile and crop to analysis region
-map_sf <- st_read("data/bc_shp/bc_municipio.shp") %>% 
+map_sf <- st_read("data/bc_shp/bc_municipio.shp", quiet = TRUE) %>% 
   st_crop(bounds) %>% 
   st_transform(crs_ea_mex)
 
@@ -106,7 +116,7 @@ pred_dat <- as.data.frame(depth_ras, xy = TRUE) %>%
 
 f <- list.files("data/quota_shp/", pattern = ".shp", full.names = TRUE)
 
-quotas <- st_read("data/quota_estates.shp")
+quotas <- st_read("data/quota_estates.shp", quiet = TRUE)
 
 ggplot() + geom_sf(data = quotas, aes(fill = Estate))
 
@@ -147,17 +157,22 @@ We will also fit each of these with site as a random factor in addition.
 
 ### INLA Mesh
 
-We need a spatial mesh to create the spatial random field. This will be restricted to the convex hull around the prediction points. 
+We need a spatial mesh to create the spatial random field. This will be restricted to the convex hull around the prediction points, and such that land forms a barrier. The range value is $\rho =$ `r range0` and the sd value is `\sigma = 3`. Both have low probability (0.05). 
 
 ```{r create_mesh}
+# get boundary
+bound <- dat %>% 
+  st_union %>% 
+  st_convex_hull %>% 
+  st_difference(st_combine(map_sf))
+
+bound_sp <- as(bound, "Spatial")
+bound_sp <- gSimplify(bound_sp, tol = 100)
+
 # Create mesh
 pred_dat <- pred_dat %>% as.matrix
 coords_dat <- st_coordinates(dat)
-
-ch <- inla.nonconvex.hull(rbind(pred_dat, coords_dat) %>% as.matrix, convex = -0.05)
-
-# NB this mesh could be smaller - when we've got a good analysis going, need to change it. 
-mesh <- inla.mesh.2d(boundary = ch,
+mesh <- inla.mesh.2d(boundary = as.inla.mesh.segment(bound_sp),
                      #offset = 0.1,
                      max.edge = 5000)
 
@@ -169,7 +184,16 @@ mesh$n
 
 # Associate observation locations with mesh vertices
 A <- inla.spde.make.A(mesh, loc = coords_dat)
-spde <- inla.spde2.matern(mesh, alpha = 2)
+
+# based on render parameters - either runs the PC prior version with a specified range, or runs a standard uninformative prior. 
+
+if(pcprior) {
+  spde <- inla.spde2.pcmatern(mesh, alpha = 2, 
+                                prior.range = c(range0, 0.05), 
+                                prior.sigma = c(3, 0.05))
+} else {
+  spde <- inla.spde2.matern(mesh, alpha = 2)  
+}
 
 A_pred <- inla.spde.make.A(mesh, loc = pred_dat)
 ```
@@ -185,21 +209,23 @@ dat <- mutate(dat, site_name = as.numeric(as.factor(site_name)),
               date = as.numeric(date))
 stack_y <- inla.stack(tag = "est.y", 
                       data = list(alldata = cbind(dat$y, NA), link = 1), 
-                      A = list(A, A, 1, 1, 1),
+                      A = list(A, A, 1, 1, 1, 1),
                       effects = list(
                         y_field = 1:spde$n.spde,
                         yc_field = 1:spde$n.spde,
                         y_intercept = rep(1, nobs),
                         site = dat$site_name,
+                        transect = dat$transect,
                         date = dat$date))
 
 stack_z <- inla.stack(tag = "est.z", 
                       data = list(alldata = cbind(NA, dat$z), link = 2), 
-                      A = list(A, 1, 1, 1),
+                      A = list(A, 1, 1, 1, 1),
                       effects = list(
                         z_field = 1:spde$n.spde,
                         z_intercept = rep(1, nobs),
                         site = dat$site_name,
+                        transect = dat$transect,
                         date = dat$date))
 
 stack_yz <- inla.stack(stack_y, stack_z)
@@ -209,20 +235,20 @@ stack_yz <- inla.stack(stack_y, stack_z)
 
 Finally, we're going to run the model. We will use a hurdle model approach (binomial for occupancy, negbin for abundance). To do this, we are following Chapter Six of the [INLA SPDE Tutorial](https://folk.ntnu.no/fuglstad/Lund2016/Session6/spde-tutorial.pdf). 
 
-```{r inla_models, eval = FALSE}
+```{r inla_models}
 # 1. Null (intercept only)
 f_null <- alldata ~ -1 + z_intercept + y_intercept
 m_null <- inla(f_null, family = c("gamma", "binomial"),
                data = inla.stack.data(stack_yz),
                control.predictor = list(A = inla.stack.A(stack_yz)),
-               control.compute = list(dic = TRUE))
+               control.compute = list(dic = TRUE, waic = TRUE))
 
 f_nulls <- alldata ~ -1 + z_intercept + y_intercept + 
   f(site, model = "iid")
 m_nulls <- inla(f_nulls, family = c("gamma", "binomial"),
                 data = inla.stack.data(stack_yz),
                 control.predictor = list(A = inla.stack.A(stack_yz)),
-                control.compute = list(dic = TRUE))
+                control.compute = list(dic = TRUE, waic = TRUE))
 
 # 2. Time only (random date field)
 f_time <- alldata ~ -1 + z_intercept + y_intercept + 
@@ -230,7 +256,7 @@ f_time <- alldata ~ -1 + z_intercept + y_intercept +
 m_time <- inla(f_time, family = c("gamma", "binomial"),
                data = inla.stack.data(stack_yz),
                control.predictor = list(A = inla.stack.A(stack_yz)),
-               control.compute = list(dic = TRUE))
+               control.compute = list(dic = TRUE, waic = TRUE))
 
 f_times <- alldata ~ -1 + z_intercept + y_intercept + 
   f(date, model = "rw2") + 
@@ -238,7 +264,17 @@ f_times <- alldata ~ -1 + z_intercept + y_intercept +
 m_times <- inla(f_times, family = c("gamma", "binomial"),
                 data = inla.stack.data(stack_yz),
                 control.predictor = list(A = inla.stack.A(stack_yz)),
-                control.compute = list(dic = TRUE, config = TRUE))
+                control.compute = list(dic = TRUE, waic = TRUE, config = TRUE))
+
+f_timest <- alldata ~ -1 + z_intercept + y_intercept + 
+  f(date, model = "rw2") + 
+  f(transect, model = "iid") + 
+  f(site, model = "iid")
+
+m_timest <- inla(f_timest, family = c("gamma", "binomial"),
+                data = inla.stack.data(stack_yz),
+                control.predictor = list(A = inla.stack.A(stack_yz)),
+                control.compute = list(dic = TRUE, waic = TRUE, config = TRUE))
 
 # 3. Space only (random spatial field)
 f_spatial <- alldata ~ -1 + z_intercept + y_intercept + 
@@ -250,7 +286,7 @@ m_spatial <- inla(f_spatial,
                   family = c("gamma", "binomial"), 
                   data = inla.stack.data(stack_yz),
                   control.predictor = list(A = inla.stack.A(stack_yz)),
-                  control.compute = list(dic = TRUE, config = TRUE))
+                  control.compute = list(dic = TRUE, waic = TRUE, config = TRUE))
 
 f_spatials <- alldata ~ -1 + z_intercept + y_intercept + 
   f(site, model = "iid") + 
@@ -262,7 +298,7 @@ m_spatials <- inla(f_spatials,
                    family = c("gamma", "binomial"), 
                    data = inla.stack.data(stack_yz),
                    control.predictor = list(A = inla.stack.A(stack_yz)),
-                   control.compute = list(dic = TRUE, config = TRUE))
+                   control.compute = list(dic = TRUE, waic = TRUE, config = TRUE))
 
 # 5. Spatial-temporal model
 f_sptemp <- alldata ~ -1 + z_intercept + y_intercept + 
@@ -274,7 +310,7 @@ f_sptemp <- alldata ~ -1 + z_intercept + y_intercept +
 m_sptemp <- inla(f_sptemp, family = c("gamma", "binomial"),
                  data = inla.stack.data(stack_yz),
                  control.predictor = list(A = inla.stack.A(stack_yz)),
-                 control.compute = list(dic = TRUE, config = TRUE))
+                 control.compute = list(dic = TRUE, waic = TRUE, config = TRUE))
 
 f_sptemps <- alldata ~ -1 + z_intercept + y_intercept + 
   f(date, model = "rw2") +
@@ -286,14 +322,29 @@ f_sptemps <- alldata ~ -1 + z_intercept + y_intercept +
 m_sptemps <- inla(f_sptemps, family = c("gamma", "binomial"),
                   data = inla.stack.data(stack_yz),
                   control.predictor = list(A = inla.stack.A(stack_yz)),
-                  control.compute = list(dic = TRUE, config = TRUE))
+                  control.compute = list(dic = TRUE, waic = TRUE, config = TRUE))
+
+f_sptempst <- alldata ~ -1 + z_intercept + y_intercept + 
+  f(date, model = "rw2") +
+  f(site, model = "iid") +
+  f(transect, model = "iid") + 
+  f(z_field, model = spde) +
+  f(y_field, model = spde) + 
+  f(yc_field, copy = "z_field", fixed = FALSE)
+
+m_sptempst <- inla(f_sptempst, family = c("gamma", "binomial"),
+                  data = inla.stack.data(stack_yz),
+                  control.predictor = list(A = inla.stack.A(stack_yz)),
+                  control.compute = list(dic = TRUE, waic = TRUE, config = TRUE))
 
 mods <- list(null = m_null, nulls = m_nulls, 
-             time = m_time, times = m_times,
+             time = m_time, times = m_times, timest = m_timest,
              spatial = m_spatial, spatials = m_spatials, 
-             sptemp = m_sptemp, sptemps = m_sptemps)
+             sptemp = m_sptemp, sptemps = m_sptemps, 
+             sptempst = m_sptempst)
 
-save(mods, file = "results/model_out.Rda")
+fname = ifelse(pcprior, paste0("results/pc",range0,"_out.Rda", "results/uninf_out.Rda"))
+save(mods, file = fname)
 ```
 
 ## Model Comparison
@@ -301,7 +352,7 @@ save(mods, file = "results/model_out.Rda")
 ### DIC Comparison
 
 ```{r dic}
-load("results/model_out.Rda")
+load(fname)
 
 # DIC table
 map_dfr(mods, function(x) {
@@ -314,7 +365,6 @@ map_dfr(mods, function(x) {
   select(-family) %>% 
   spread(measure, dic) %>% 
   arrange(Abundance) %>% 
-  write_csv("results/dic_table.csv") %>% 
   kable
 ```
 

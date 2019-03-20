@@ -21,3 +21,5 @@ dplyr
 stringr
 forcats
 bindrcpp
+rgeos
+smoothr
