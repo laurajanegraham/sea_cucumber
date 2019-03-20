@@ -9,7 +9,6 @@ output:
     theme: flatly
 params: 
   range0: 100
-  pcprior: false
 ---
 
 ```{r setup, include=FALSE}
@@ -19,6 +18,7 @@ knitr::opts_chunk$set(echo = TRUE,
                       figures = 'figures/')
 
 library(raster)
+library(rgeos)
 library(lubridate)
 library(sf)
 library(ggsn)
@@ -37,7 +37,6 @@ theme_set(theme_bw(base_size = 7) + theme(panel.grid = element_blank()))
 crs_ea_mex <- "+proj=aea +lat_1=14.5 +lat_2=32.5 +lat_0=24 +lon_0=-105 +x_0=0 +y_0=0 +ellps=GRS80 +datum=NAD83 +units=m +no_defs"
 
 # parameter input
-pcprior <- params$pcprior
 range0 <- params$range0
 ```
 
@@ -164,6 +163,7 @@ We need a spatial mesh to create the spatial random field. This will be restrict
 bound <- dat %>% 
   st_union %>% 
   st_convex_hull %>% 
+  st_buffer(dist = 20000) %>% 
   st_difference(st_combine(map_sf))
 
 bound_sp <- as(bound, "Spatial")
@@ -176,26 +176,44 @@ mesh <- inla.mesh.2d(boundary = as.inla.mesh.segment(bound_sp),
                      #offset = 0.1,
                      max.edge = 5000)
 
+max_edge = 5000
+bound_outer = 20000
+mesh = inla.mesh.2d(boundary = bound_sp,
+                     loc=coords_dat,
+                    max.edge = c(1,5)*max_edge,
+                    offset = c(max_edge, bound_outer))
+
 # get locs of points and plot the mesh with the pred and obs points
 plot(mesh)
-#points(pred_dat[,1:2], col = 1, pch = 16, cex = 1)
-points(coords_dat, col = 2, pch = 16, cex = 1)
+points(coords_dat, col = "black", pch = 16, cex = 1)
 mesh$n
+
+# get the triangles which are in/outside of the boundary
+tl = length(mesh$graph$tv[,1])
+
+pos_tri <- sapply(1:tl, function(t) {
+  temp = mesh$loc[mesh$graph$tv[t, ], ]
+  return(colMeans(temp)[c(1,2)])
+})
+
+pos_tri = SpatialPoints(t(pos_tri), proj4string = crs(bound_sp))
+
+# - compute the triangle positions
+normal = over(bound_sp, pos_tri, returnList=T)
+# - checking which mesh triangles are inside the normal area
+normal = unlist(normal)
+barrier_triangles = setdiff(1:tl, normal)
+
+poly_barrier = inla.barrier.polygon(mesh, barrier_triangles)
 
 # Associate observation locations with mesh vertices
 A <- inla.spde.make.A(mesh, loc = coords_dat)
-
-# based on render parameters - either runs the PC prior version with a specified range, or runs a standard uninformative prior. 
-
-if(pcprior) {
-  spde <- inla.spde2.pcmatern(mesh, alpha = 2, 
-                                prior.range = c(range0, 0.05), 
-                                prior.sigma = c(3, 0.05))
-} else {
-  spde <- inla.spde2.matern(mesh, alpha = 2)  
-}
-
 A_pred <- inla.spde.make.A(mesh, loc = pred_dat)
+
+spde <- inla.barrier.pcmatern(mesh, 
+                              barrier.triangles = barrier_triangles, 
+                              prior.range = c(range0, 0.05), 
+                              prior.sigma = c(3, 0.05))
 ```
 
 ### INLA Stacks
@@ -343,7 +361,7 @@ mods <- list(null = m_null, nulls = m_nulls,
              sptemp = m_sptemp, sptemps = m_sptemps, 
              sptempst = m_sptempst)
 
-fname = ifelse(pcprior, paste0("results/pc",range0,"_out.Rda", "results/uninf_out.Rda"))
+fname = paste0("results/pc",range0,"_out.Rda")
 save(mods, file = fname)
 ```
 
