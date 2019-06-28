@@ -23,3 +23,5 @@ forcats
 bindrcpp
 rgeos
 smoothr
+viridisLite
+MatrixModels

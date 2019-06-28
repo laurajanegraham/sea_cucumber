@@ -11,35 +11,7 @@ params:
   range0: 100
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE,
-                      warning = FALSE,
-                      message = FALSE,
-                      figures = 'figures/')
 
-library(raster)
-library(rgeos)
-library(lubridate)
-library(sf)
-library(ggsn)
-library(gstat)
-library(GGally)
-library(INLA)
-library(knitr)
-library(broom)
-library(patchwork)
-library(tidyverse)
-
-# set up plotting options
-theme_set(theme_bw(base_size = 8) + theme(panel.grid = element_blank()))
-
-# Albers equal area coordinate reference system for Mexico:
-crs_ea_mex <- "+proj=aea +lat_1=14.5 +lat_2=32.5 +lat_0=24 +lon_0=-105 +x_0=0 +y_0=0 +ellps=GRS80 +datum=NAD83 +units=m +no_defs"
-
-# parameter input
-range0 <- params$range0
-fname = paste0("results/pc",range0,"_out.Rda")
-```
 
 ## Aim
 
@@ -47,7 +19,8 @@ In this analysis we want to create spatial estimates of sea cucumber abundance w
 
 ## Data
 
-```{r load_data}
+
+```r
 # sea cucumber abundance and some environmental variables
 dat <- read_csv("data/sea_cucumber_data.csv", na = c("", "NA", "ND")) %>% 
   select(site_name, transect, latitude, longitude, date, sc_density) %>% 
@@ -64,24 +37,28 @@ dat <- read_csv("data/sea_cucumber_data.csv", na = c("", "NA", "ND")) %>%
   st_transform(crs_ea_mex)
 ```
 
-We have `r nrow(dat)` observations of sea cucumber densities. These are from `r length(unique(dat$site_name))` sites, collected between `r min(dat$date)` and `r max(dat$date)`.
+We have 1107 observations of sea cucumber densities. These are from 118 sites, collected between 2014-10-16 and 2015-09-12.
 
 ### Data exploration
 
 What do the sea cucumber densities look like. 
 
-```{r explore_distributions}
+
+```r
 ggplot(data = dat, aes(x = sc_density)) + 
   geom_histogram(binwidth = 0.01)
 ```
 
-Non-zero density ranges from `r min(dat$y, na.rm = TRUE)/100` to `r max(dat$y, na.rm = TRUE)/100`; we will model the abundances (*100) as a negative binomial hurdle model. Occurrence will be fitted with a binomial model. 
+![](C:/Users/lg1u16/GIT_PROJECTS/SIDEPROJ/sea_cucumber/doc/sea_cucumber_range5000_files/figure-html/explore_distributions-1.png)<!-- -->
+
+Non-zero density ranges from 10^{-4} to 0.0058; we will model the abundances (*100) as a negative binomial hurdle model. Occurrence will be fitted with a binomial model. 
 
 ### Spatial data
 
 We only want to model and predict within the < 30m depth zone, so let's load this data, plot and create some prediction points. 
 
-```{r spatial_data, fig.width = 6.3, fig.height = 9.5}
+
+```r
 # set the boundary for analysis
 # currently fixing these boundaries so that we don't get the wide bit - revisit
 bounds <- c(xmin = -114.5, ymin = 28, xmax = -112.5, ymax = 30)
@@ -110,7 +87,11 @@ f <- list.files("data/quota_shp/", pattern = ".shp", full.names = TRUE)
 quotas <- st_read("data/quota_estates.shp", quiet = TRUE)
 
 ggplot() + geom_sf(data = quotas, aes(fill = Estate))
+```
 
+![](C:/Users/lg1u16/GIT_PROJECTS/SIDEPROJ/sea_cucumber/doc/sea_cucumber_range5000_files/figure-html/spatial_data-1.png)<!-- -->
+
+```r
 quotas_sp <- as(quotas, "Spatial")
 
 study_site <- ggplot() + 
@@ -125,13 +106,16 @@ study_site <- ggplot() +
 ggsave(plot = study_site, filename = "figures/study_site.jpg", dpi = 300, width = 140, units = "mm")
 ```
 
-```{r spatiotemporal_data, cache = TRUE, fig.width = 15, fig.height = 15}
+
+```r
 ggplot() +
   geom_sf(data = dat %>% select(-month), colour = "lightgrey") + 
   geom_sf(data = dat %>% arrange(sc_density), aes(colour = sc_density)) + 
   scale_colour_viridis_c(name = "Sea Cucumber Abundance") + 
   facet_wrap(~month)
 ```
+
+![](C:/Users/lg1u16/GIT_PROJECTS/SIDEPROJ/sea_cucumber/doc/sea_cucumber_range5000_files/figure-html/spatiotemporal_data-1.png)<!-- -->
 
 Date structure in the sampling, will need to account for. 
 
@@ -141,9 +125,10 @@ We will compare 2 different modelling approaches: one with a spatial random fiel
 
 ### INLA Mesh
 
-We need a spatial mesh to create the spatial random field. This will be restricted to the convex hull around the prediction points, and such that land forms a barrier. The range value for the PC prior is $\rho =$ `r range0` and the sd value is `\sigma = 30`. Both have low probability (0.05). 
+We need a spatial mesh to create the spatial random field. This will be restricted to the convex hull around the prediction points, and such that land forms a barrier. The range value for the PC prior is $\rho =$ 5000 and the sd value is `\sigma = 30`. Both have low probability (0.05). 
 
-```{r create_mesh}
+
+```r
 # get boundary
 bound <- dat %>% 
   st_union %>% 
@@ -171,8 +156,19 @@ mesh = inla.mesh.2d(boundary = bound_sp,
 # get locs of points and plot the mesh with the pred and obs points
 plot(mesh, lwd = 0.5)
 points(coords_dat, col = "black", pch = 16, cex = 1)
-mesh$n
+```
 
+![](C:/Users/lg1u16/GIT_PROJECTS/SIDEPROJ/sea_cucumber/doc/sea_cucumber_range5000_files/figure-html/create_mesh-1.png)<!-- -->
+
+```r
+mesh$n
+```
+
+```
+## [1] 1399
+```
+
+```r
 # get the triangles which are in/outside of the boundary
 tl = length(mesh$graph$tv[,1])
 
@@ -204,7 +200,8 @@ spde <- inla.barrier.pcmatern(mesh,
 
 To model in INLA we need to create data stacks of fitting and prediction data. 
 
-```{r stack_data}
+
+```r
 # create the stacks
 nobs = nrow(dat)
 dat <- dat %>% mutate(site_name = as.numeric(as.factor(site_name)),
@@ -239,7 +236,8 @@ stack_yz <- inla.stack(stack_y, stack_z)
 
 Finally, we're going to run the model. We will use a hurdle model approach (binomial for occupancy, negbin for abundance). To do this, we are following Chapter Six of the [INLA SPDE Tutorial](https://folk.ntnu.no/fuglstad/Lund2016/Session6/spde-tutorial.pdf). 
 
-```{r inla_models, eval = FALSE}
+
+```r
 f_null <- alldata ~ -1 + z_intercept + y_intercept + 
   f(date, model = "rw2") + 
   f(transect, model = "iid") + 
@@ -274,7 +272,8 @@ save(mods, file = fname)
 
 ### DIC/WAIC Comparison
 
-```{r dic}
+
+```r
 load(fname)
 
 # DIC table
@@ -289,7 +288,16 @@ map_dfr(mods, function(x) {
   spread(measure, dic) %>% 
   arrange(Abundance) %>% 
   kable
+```
 
+
+
+model      Abundance   Occurrence
+--------  ----------  -----------
+spatial    -3363.765     1289.839
+null       -3312.765     1323.099
+
+```r
 # WAIC table
 map_dfr(mods, function(x) {
   tibble(waic = x$waic$local.waic, family = x$dic$family) %>% 
@@ -304,9 +312,17 @@ map_dfr(mods, function(x) {
   kable
 ```
 
+
+
+model      Abundance   Occurrence
+--------  ----------  -----------
+spatial    -3383.344     1289.515
+null       -3326.761     1324.217
+
 ### Predicted vs Observed
 
-```{r, pred_obs}
+
+```r
 dat <- dat %>% st_set_geometry(NULL)
 idy <- which(dat[,"y"] > 0)
 idz <- which(!is.na(dat$z))
@@ -347,15 +363,89 @@ occurrence <- ggplot(pred_vals %>% filter(measure == "Occurrence"),
 density + occurrence + plot_layout(nrow = 2)
 ```
 
+![](C:/Users/lg1u16/GIT_PROJECTS/SIDEPROJ/sea_cucumber/doc/sea_cucumber_range5000_files/figure-html/pred_obs-1.png)<!-- -->
+
 ### Model summary
 
-```{r summ_mod}
+
+```r
 summary(mods$spatial)
+```
+
+```
+## 
+## Call:
+##    c("inla(formula = f_spatial, family = c(\"gamma\", \"binomial\"), 
+##    data = inla.stack.data(stack_yz), ", " control.compute = list(dic 
+##    = TRUE, waic = TRUE, config = TRUE), ", " control.predictor = 
+##    list(A = inla.stack.A(stack_yz)))") 
+## Time used:
+##     Pre = 0.963, Running = 981, Post = 5.51, Total = 988 
+## Fixed effects:
+##               mean    sd 0.025quant 0.5quant 0.975quant   mode kld
+## z_intercept  0.337 0.185     -0.038    0.340      0.695  0.345   0
+## y_intercept -3.587 0.199     -3.963   -3.582     -3.250 -3.573   0
+## 
+## Random effects:
+##   Name	  Model
+##     date RW2 model
+##    site IID model
+##    transect IID model
+##    z_field RGeneric2
+##    y_field RGeneric2
+##    yc_field Copy
+## 
+## Model hyperparameters:
+##                                                     mean       sd
+## Precision parameter for the Gamma observations     5.914 5.52e-01
+## Precision for date                             25323.301 1.49e+04
+## Precision for site                                 8.905 2.79e+00
+## Precision for transect                             4.733 7.09e-01
+## Theta1 for z_field                                -0.122 1.74e-01
+## Theta2 for z_field                                 8.675 3.39e-01
+## Theta1 for y_field                                -2.022 4.51e-01
+## Theta2 for y_field                                10.547 9.46e-01
+## Beta for yc_field                                  0.479 8.00e-02
+##                                                0.025quant  0.5quant
+## Precision parameter for the Gamma observations      4.889     5.894
+## Precision for date                               6947.955 21983.932
+## Precision for site                                  4.786     8.448
+## Precision for transect                              3.531     4.664
+## Theta1 for z_field                                 -0.469    -0.119
+## Theta2 for z_field                                  8.020     8.669
+## Theta1 for y_field                                 -2.971    -1.993
+## Theta2 for y_field                                  8.757    10.518
+## Beta for yc_field                                   0.323     0.477
+##                                                0.975quant      mode
+## Precision parameter for the Gamma observations      7.062     5.860
+## Precision for date                              63532.782 16083.629
+## Precision for site                                 15.620     7.613
+## Precision for transect                              6.309     4.516
+## Theta1 for z_field                                  0.215    -0.110
+## Theta2 for z_field                                  9.356     8.648
+## Theta1 for y_field                                 -1.209    -1.888
+## Theta2 for y_field                                 12.471    10.415
+## Beta for yc_field                                   0.640     0.473
+## 
+## Expected number of effective parameters(stdev): 361.73(20.26)
+## Number of equivalent replicates : 4.92 
+## 
+## Deviance Information Criterion (DIC) ...............: -2073.93
+## Deviance Information Criterion (DIC, saturated) ....: 2289.34
+## Effective number of parameters .....................: 360.67
+## 
+## Watanabe-Akaike information criterion (WAIC) ...: -2093.83
+## Effective number of parameters .................: 273.25
+## 
+## Marginal log-Likelihood:  876.67 
+## Posterior marginals for the linear predictor and
+##  the fitted values are computed
 ```
 
 ## Prediction of the response
 
-```{r pred_vals}
+
+```r
 # get the id's for each field
 samples <- inla.posterior.sample(n = 10000, result = mods$spatial)
 
@@ -390,7 +480,8 @@ locs <- locs %>%
 
 ### Density predictions
 
-```{r density_plot, fig.width = 15, fig.height = 8}
+
+```r
 # rasterize the boundary area to get locations for plot
 ymean_plot <- ggplot() + 
   geom_raster(data = locs, aes(x = x, y = y, fill = ymean)) + 
@@ -405,13 +496,18 @@ yci_plot <- ggplot() +
   labs(x = "", y = "") 
 
 ymean_plot + yci_plot + plot_annotation(tag_levels = "a", tag_suffix = ")")
+```
 
-ggsave(plot = ymean_plot, filename = "~/Google Drive/SIDEPROJ/Papers/sea cucumber/density_preds.jpg", dpi = 300, width = 8, height = 6, units = "in")
+![](C:/Users/lg1u16/GIT_PROJECTS/SIDEPROJ/sea_cucumber/doc/sea_cucumber_range5000_files/figure-html/density_plot-1.png)<!-- -->
+
+```r
+ggsave(plot = ymean_plot, filename = "~/Google Drive/SIDEPROJ/Papers/sea cucumber/density_preds.jpg", dpi = 300, width = 80, height = 60, units = "mm")
 ```
 
 ### Occurrence predictions
 
-```{r occ_plot, fig.width = 15, fig.height = 8}
+
+```r
 zmean_plot <- ggplot() + 
   geom_raster(data = locs, aes(x = x, y = y, fill = zmean)) + 
   geom_sf(data = map_sf, colour = "lightgrey", fill = "lightgrey") + 
@@ -426,11 +522,14 @@ zci_plot <- ggplot() +
 
 zmean_plot + zci_plot + plot_annotation(tag_levels = "a", tag_suffix = ")")
 ```
+
+![](C:/Users/lg1u16/GIT_PROJECTS/SIDEPROJ/sea_cucumber/doc/sea_cucumber_range5000_files/figure-html/occ_plot-1.png)<!-- -->
 ## Comparison against quotas
 
 We use the shapes from Luis to make predictions of units within the estates for comparison against granted quotas. 
 
-```{r prediction_rasters}
+
+```r
 density_mean <- locs %>% 
   select(x, y, ymean) %>% 
   mutate(ymean = ymean * 100 * 100) %>% 
@@ -466,7 +565,8 @@ nulldensity <- stack(list(nullmean = nulldensity_mean,
                           nulluci = nulldensity_uci))
 ```
 
-```{r quota_preds}
+
+```r
 # multiply by depth raster so we only predict in < 30m depth
 depth_ras <- fasterize::fasterize(depth_sf, density[[1]])
 density <- density * depth_ras
@@ -498,9 +598,24 @@ bind_cols(quotas, quota_preds, quota_nullpreds, quota_area) %>%
   kable
 ```
 
+
+
+Estate    total_area   suitable_area       mean         lci         uci    nullmean    nulllci     nulluci      uniform      smean        slci       nmean       nlci
+-------  -----------  --------------  ---------  ----------  ----------  ----------  ---------  ----------  -----------  ---------  ----------  ----------  ---------
+1           2730.271             791   244594.1    75941.96    585348.0    258715.1   228531.3    291927.9     819081.4   24459.41    7594.196    25871.51   22853.13
+2           8276.371             900   283562.8   102412.16    632007.4    294366.1   260023.0    332155.6    2482911.4   28356.28   10241.216    29436.61   26002.30
+3          17363.769            2344   989238.8   475416.05   1846396.9    766660.3   677215.3    865080.8    5209130.6   98923.88   47541.605    76666.03   67721.53
+4          14141.100            1119   435171.3   164690.80    957603.0    365995.2   323295.2    412980.1    4242329.9   43517.13   16469.080    36599.52   32329.52
+5           6577.154            1201   449312.5   197079.91    875946.7    392815.3   346986.2    443243.2    1973146.1   44931.25   19707.991    39281.53   34698.62
+6          17134.589            2368   726826.4   279372.58   1571839.7    774510.0   684149.3    873938.3    5140376.8   72682.64   27937.258    77451.00   68414.93
+7          10100.025            1575   407084.8   139997.39    914842.0    515140.8   455040.2    581272.3    3030007.6   40708.48   13999.739    51514.08   45504.02
+8          34743.706            3125   779586.7   230470.96   1929431.6   1022104.7   902857.5   1153318.1   10423111.7   77958.67   23047.096   102210.47   90285.75
+9           2860.709             520   136981.8    47866.03    313110.2    170078.2   150235.5    191912.1     858212.7   13698.18    4786.603    17007.82   15023.55
+
 Plot showing the estimated quotas (mean and LCI) against the granted quotas. 
 
-```{r}
+
+```r
 dat <- bind_cols(read_csv("results/quotas.csv"), 
                  tibble(granted_quota = c(6750, 6750, 6250, 6750, 6250, 47088, 27390, 24315, 12158))) %>% 
   mutate(Estate = factor(Estate)) %>% 
@@ -528,8 +643,11 @@ ggplot() +
   ylab("Quota (in number of pieces of sea cucumber)") + 
   theme(legend.position = c(0.15, 0.8),
         legend.title = element_blank())
+```
 
-ggsave(filename = "~/Google Drive/SIDEPROJ/Papers/sea cucumber/3_quotas.jpg", dpi = 300, width = 170, height = 120, units = "mm")
-  
+![](C:/Users/lg1u16/GIT_PROJECTS/SIDEPROJ/sea_cucumber/doc/sea_cucumber_range5000_files/figure-html/unnamed-chunk-1-1.png)<!-- -->
+
+```r
+ggsave(filename = "~/Google Drive/SIDEPROJ/Papers/sea cucumber/3_quotas.jpg", dpi = 300, width = 140, height = 80, units = "mm")
 ```
 
